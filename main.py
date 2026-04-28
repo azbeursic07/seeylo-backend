@@ -5,14 +5,14 @@ from openai import OpenAI
 
 app = FastAPI()
 
-# 🔑 API KEYS
+# 🔑 KEYS
 TWELVE_API_KEY = os.getenv("TWELVE_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 
-# 🔥 UNIVERSAL SYMBOL FORMATTER
+# 🔥 SYMBOL FORMAT
 def format_symbol(symbol: str):
     symbol = symbol.upper().strip()
 
@@ -23,11 +23,11 @@ def format_symbol(symbol: str):
         "GBPUSD": "GBP/USD",
         "USDJPY": "USD/JPY",
 
-        # INDICES
-        "US30": "DJI",
-        "NAS100": "IXIC",
-        "NQ": "IXIC",
-        "SPX": "SPX",
+        # INDICES (proxy)
+        "NQ": "QQQ",
+        "NAS100": "QQQ",
+        "US30": "DIA",
+        "SPX": "SPY",
 
         # CRYPTO
         "BTC": "BTC/USD",
@@ -35,6 +35,11 @@ def format_symbol(symbol: str):
     }
 
     return mapping.get(symbol, symbol)
+
+
+# 🔁 QQQ → NQ scaling
+def convert_to_nq(price):
+    return price * 27
 
 
 # 💰 GET PRICE
@@ -51,7 +56,7 @@ def get_price(symbol: str):
         return None
 
 
-# 📊 GET CANDLES (MULTI DATA)
+# 📊 GET CANDLES
 def get_candles(symbol: str):
     try:
         url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=5min&outputsize=30&apikey={TWELVE_API_KEY}"
@@ -65,30 +70,26 @@ def get_candles(symbol: str):
         return None
 
 
-# 🧠 AI PRO ANALYSIS
+# 🧠 AI ANALYSIS (PRO)
 def analyze(symbol, price, candles):
 
     prompt = f"""
 You are an elite institutional trader.
 
-Analyze this market using:
-- Market structure (HH, HL, LH, LL)
-- Liquidity zones
+Analyze using:
+- Market structure
+- Liquidity
 - Support & Resistance
-- Trend direction
-- Momentum
-- Smart Money Concepts
+- Trend & momentum
 
 Rules:
-- ALWAYS provide a trade setup
-- Even if weak, give best possible setup
-- Risk/Reward must be >= 1.5
-- Be realistic (no random numbers)
+- ALWAYS give best possible trade
+- Risk/Reward >= 1.5
 
 Data:
 Symbol: {symbol}
-Current Price: {price}
-Recent Candles: {candles[:10]}
+Price: {price}
+Candles: {candles[:10]}
 
 Return STRICT format:
 
@@ -120,8 +121,8 @@ def analyze_market(symbol: str = "XAUUSD"):
 
     formatted_symbol = format_symbol(symbol)
 
-    # 💰 price
     price = get_price(formatted_symbol)
+
     if not price:
         return {
             "symbol": symbol,
@@ -129,8 +130,8 @@ def analyze_market(symbol: str = "XAUUSD"):
             "error": "No price data (check API key or symbol)"
         }
 
-    # 📊 candles
     candles = get_candles(formatted_symbol)
+
     if not candles:
         return {
             "symbol": symbol,
@@ -139,12 +140,17 @@ def analyze_market(symbol: str = "XAUUSD"):
             "error": "No candle data"
         }
 
-    # 🧠 AI
     analysis = analyze(formatted_symbol, price, candles)
+
+    # 🔥 NQ conversion
+    price_nq = None
+    if symbol.upper() in ["NQ", "NAS100"]:
+        price_nq = convert_to_nq(price)
 
     return {
         "symbol": symbol,
         "formatted_symbol": formatted_symbol,
         "price": price,
+        "price_nq": price_nq,
         "analysis": analysis
     }
