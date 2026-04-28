@@ -1,4 +1,4 @@
-fastapi
-uvicorn
-requests
-openai
+fastapi==0.110.0
+uvicorn==0.29.0
+requests==2.31.0
+openai==1.30.1
