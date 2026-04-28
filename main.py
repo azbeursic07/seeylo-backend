@@ -1,157 +1,151 @@
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 import requests
 import os
-from openai import OpenAI
+import numpy as np
 
 app = FastAPI()
 
-# ===== CORS =====
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+API_KEY = os.getenv("TWELVEDATA_API_KEY")
 
-# ===== KEYS =====
-TWELVE_API_KEY = os.getenv("TWELVE_API_KEY")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# ======================
+# HEALTH CHECK
+# ======================
+@app.get("/")
+def root():
+    return {"status": "running"}
 
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-# ===== SYMBOL MAP =====
-def map_symbol(symbol):
-    symbol = symbol.upper()
-    mapping = {
-        "NQ": "NQ=F",
-        "ES": "ES=F",
-        "SPX": "SPY",
-        "XAUUSD": "XAU/USD",
-        "GOLD": "XAU/USD",
-        "BTC": "BTC/USD",
-        "ETH": "ETH/USD"
-    }
-    return mapping.get(symbol, symbol)
-
-# ===== GET PRICE =====
-def get_price(symbol):
-    mapped = map_symbol(symbol)
-
+# ======================
+# FETCH DATA
+# ======================
+def get_data(symbol):
     try:
-        url = f"https://api.twelvedata.com/price?symbol={mapped}&apikey={TWELVE_API_KEY}"
-        res = requests.get(url, timeout=5)
-        data = res.json()
+        url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=5min&outputsize=100&apikey={API_KEY}"
+        r = requests.get(url, timeout=10).json()
 
-        if "price" not in data:
+        if "values" not in r:
             return None
 
-        return float(data["price"])
+        closes = [float(c["close"]) for c in r["values"]][::-1]
+        highs = [float(c["high"]) for c in r["values"]][::-1]
+        lows = [float(c["low"]) for c in r["values"]][::-1]
+
+        return closes, highs, lows
 
     except:
         return None
 
-# ===== GET CANDLES =====
-def get_candles(symbol, interval="5min"):
-    mapped = map_symbol(symbol)
+# ======================
+# INDICATORS
+# ======================
+def ema(data, period):
+    if len(data) < period:
+        return data[-1]
+    return np.convolve(data, np.ones(period)/period, mode='valid')[-1]
 
-    url = f"https://api.twelvedata.com/time_series?symbol={mapped}&interval={interval}&outputsize=50&apikey={TWELVE_API_KEY}"
+def rsi(data, period=14):
+    if len(data) < period + 1:
+        return 50
 
-    res = requests.get(url, timeout=5)
-    data = res.json()
+    deltas = np.diff(data)
+    gain = np.maximum(deltas, 0)
+    loss = np.abs(np.minimum(deltas, 0))
 
-    if "values" not in data:
-        return None
+    avg_gain = np.mean(gain[:period])
+    avg_loss = np.mean(loss[:period])
 
-    return data["values"]
+    if avg_loss == 0:
+        return 100
 
-# ===== TREND =====
-def detect_trend(candles):
-    closes = [float(c["close"]) for c in candles]
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
 
-    if closes[-1] > closes[0]:
-        return "UP"
-    else:
-        return "DOWN"
-
-# ===== LEVELS =====
-def get_levels(candles):
-    highs = [float(c["high"]) for c in candles]
-    lows = [float(c["low"]) for c in candles]
-
-    return max(highs), min(lows)
-
-# ===== AI ENGINE =====
-def get_ai_analysis(symbol, price, trend, high, low):
-
-    prompt = f"""
-You are an elite scalping trader.
-
-Symbol: {symbol}
-Current price: {price}
-Trend: {trend}
-Resistance: {high}
-Support: {low}
-
-Rules:
-- Trade ONLY with trend
-- Entry near support/resistance or pullback
-- RR >= 1.5
-- High probability setup only
-
-Return ONLY JSON:
-
-{{
-  "bias": "",
-  "entry": 0,
-  "sl": 0,
-  "tp": 0,
-  "rr": 0,
-  "confidence": 0,
-  "reason": ""
-}}
-"""
-
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    return response.choices[0].message.content
-
-# ===== ANALYZE =====
+# ======================
+# ANALYZE
+# ======================
 @app.get("/analyze")
 def analyze(symbol: str):
 
-    price = get_price(symbol)
+    data = get_data(symbol)
 
-    if not price:
-        return {"error": "No price data"}
+    if not data:
+        return {
+            "symbol": symbol,
+            "error": "No price data (check symbol or API key)"
+        }
 
-    candles = get_candles(symbol)
+    closes, highs, lows = data
+    price = closes[-1]
 
-    if not candles:
-        return {"error": "No candle data"}
+    ema50 = ema(closes, 50)
+    ema200 = ema(closes, 100)
+    rsi_val = rsi(closes)
 
-    trend = detect_trend(candles)
-    high, low = get_levels(candles)
+    last_high = max(highs[-10:])
+    last_low = min(lows[-10:])
 
-    try:
-        analysis = get_ai_analysis(symbol, price, trend, high, low)
-    except Exception as e:
-        return {"error": str(e)}
+    # ======================
+    # SCORE SYSTEM
+    # ======================
+    score = 0
 
+    # Trend
+    if price > ema50 > ema200:
+        score += 2
+    elif price < ema50 < ema200:
+        score -= 2
+
+    # RSI momentum
+    if rsi_val > 55:
+        score += 1
+    elif rsi_val < 45:
+        score -= 1
+
+    # Structure (near resistance/support)
+    if price >= last_high * 0.995:
+        score -= 1
+    elif price <= last_low * 1.005:
+        score += 1
+
+    # ======================
+    # DECISION (ALWAYS TRADE)
+    # ======================
+    if score >= 0:
+        bias = "BUY"
+        sl = last_low
+        tp = price + (price - sl) * 2
+    else:
+        bias = "SELL"
+        sl = last_high
+        tp = price - (sl - price) * 2
+
+    # ======================
+    # CONFIDENCE
+    # ======================
+    confidence = min(50 + abs(score) * 12, 95)
+
+    # ======================
+    # STRENGTH
+    # ======================
+    if confidence >= 80:
+        strength = "STRONG"
+    elif confidence >= 65:
+        strength = "MEDIUM"
+    else:
+        strength = "WEAK"
+
+    # ======================
+    # RESPONSE
+    # ======================
     return {
         "symbol": symbol.upper(),
-        "price": price,
-        "trend": trend,
-        "resistance": high,
-        "support": low,
-        "analysis": analysis
+        "price": round(price, 2),
+        "bias": bias,
+        "strength": strength,
+        "confidence": round(confidence, 1),
+        "entry": round(price, 2),
+        "stop_loss": round(sl, 2),
+        "take_profit": round(tp, 2),
+        "ema50": round(ema50, 2),
+        "ema200": round(ema200, 2),
+        "rsi": round(rsi_val, 2)
     }
-
-# ===== HEALTH =====
-@app.get("/")
-def root():
-    return {"status": "engine running"}
