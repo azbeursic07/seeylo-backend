@@ -15,23 +15,34 @@ def root():
     return {"status": "running"}
 
 # ======================
-# FETCH DATA
+# FETCH DATA (FIXED)
 # ======================
 def get_data(symbol):
+    # FIX SYMBOLS
+    if symbol.upper() == "XAUUSD":
+        symbol = "XAU/USD"
+    if symbol.upper() == "BTC":
+        symbol = "BTC/USD"
+
     try:
         url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=5min&outputsize=100&apikey={API_KEY}"
         r = requests.get(url, timeout=10).json()
 
-        if "values" not in r:
+        if r.get("status") != "ok":
             return None
 
-        closes = [float(c["close"]) for c in r["values"]][::-1]
-        highs = [float(c["high"]) for c in r["values"]][::-1]
-        lows = [float(c["low"]) for c in r["values"]][::-1]
+        values = r.get("values")
+        if not values:
+            return None
+
+        closes = [float(c["close"]) for c in values][::-1]
+        highs = [float(c["high"]) for c in values][::-1]
+        lows = [float(c["low"]) for c in values][::-1]
 
         return closes, highs, lows
 
-    except:
+    except Exception as e:
+        print("ERROR:", e)
         return None
 
 # ======================
@@ -94,20 +105,20 @@ def analyze(symbol: str):
     elif price < ema50 < ema200:
         score -= 2
 
-    # RSI momentum
+    # RSI
     if rsi_val > 55:
         score += 1
     elif rsi_val < 45:
         score -= 1
 
-    # Structure (near resistance/support)
+    # Structure
     if price >= last_high * 0.995:
         score -= 1
     elif price <= last_low * 1.005:
         score += 1
 
     # ======================
-    # DECISION (ALWAYS TRADE)
+    # ALWAYS TRADE
     # ======================
     if score >= 0:
         bias = "BUY"
