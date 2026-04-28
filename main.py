@@ -16,12 +16,13 @@ def ask_ai(symbol):
         Only give trade if high quality.
         If not → say NO TRADE.
 
-        Return:
-        Entry
-        Stop Loss
-        Take Profit
-        Risk/Reward
-        Confidence
+        Format response EXACTLY like:
+
+        Entry: ...
+        Stop Loss: ...
+        Take Profit: ...
+        Risk/Reward: ...
+        Confidence: ...
         """
 
         headers = {
@@ -31,7 +32,9 @@ def ask_ai(symbol):
 
         data = {
             "model": "gpt-4o-mini",
-            "messages": [{"role": "user", "content": prompt}]
+            "messages": [
+                {"role": "user", "content": prompt}
+            ]
         }
 
         res = requests.post(
@@ -40,7 +43,18 @@ def ask_ai(symbol):
             json=data
         )
 
-        return res.json()
+        response_json = res.json()
+
+        # 🔥 DEBUG SAFE
+        if "choices" not in response_json:
+            return {
+                "error": "OpenAI API error",
+                "full_response": response_json
+            }
+
+        return {
+            "result": response_json["choices"][0]["message"]["content"]
+        }
 
     except Exception as e:
         return {"error": str(e)}
