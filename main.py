@@ -8,16 +8,34 @@ OPENAI_KEY = os.getenv("OPENAI_KEY")
 TWELVE_API_KEY = os.getenv("TWELVE_API_KEY")
 
 
+# 🔥 FIX: avtomatsko formatiranje symbola
+def format_symbol(symbol):
+    symbol = symbol.upper()
+
+    if "/" in symbol:
+        return symbol
+
+    # forex pari (EURUSD → EUR/USD)
+    if len(symbol) == 6:
+        return symbol[:3] + "/" + symbol[3:]
+
+    return symbol
+
+
 def get_price(symbol):
     try:
-        url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={TWELVE_API_KEY}"
+        formatted = format_symbol(symbol)
+
+        url = f"https://api.twelvedata.com/price?symbol={formatted}&apikey={TWELVE_API_KEY}"
         res = requests.get(url).json()
 
         if "price" in res:
             return float(res["price"])
         else:
             return None
-    except:
+
+    except Exception as e:
+        print(e)
         return None
 
 
@@ -31,9 +49,9 @@ Current Price: {price}
 Analyze for short-term trade (1m–15m).
 
 Rules:
-- Use REAL current price
 - Entry must be close to current price
 - Minimum RR = 1.5
+- Give realistic levels
 
 Return EXACT format:
 
