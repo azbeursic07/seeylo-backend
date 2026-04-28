@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import requests
 import os
-import openai
+from openai import OpenAI
 
 app = FastAPI()
 
@@ -15,138 +15,143 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ===== API KEYS =====
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# ===== KEYS =====
 TWELVE_API_KEY = os.getenv("TWELVE_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# ===== SIMPLE STORAGE =====
-active_trades = []
-trade_history = []
-user_balance = 10000
-risk_per_trade = 200
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ===== SYMBOL FIX =====
-def normalize_symbol(symbol):
+# ===== SYMBOL MAP =====
+def map_symbol(symbol):
     symbol = symbol.upper()
     mapping = {
-        "NQ": "NAS100",
-        "XAU": "XAUUSD",
-        "GOLD": "XAUUSD",
+        "NQ": "NQ=F",
+        "ES": "ES=F",
+        "SPX": "SPY",
+        "XAUUSD": "XAU/USD",
+        "GOLD": "XAU/USD",
         "BTC": "BTC/USD",
-        "ES": "SPX500"
+        "ETH": "ETH/USD"
     }
     return mapping.get(symbol, symbol)
 
 # ===== GET PRICE =====
 def get_price(symbol):
-    url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={TWELVE_API_KEY}"
-    res = requests.get(url).json()
+    mapped = map_symbol(symbol)
 
-    if "price" not in res:
+    try:
+        url = f"https://api.twelvedata.com/price?symbol={mapped}&apikey={TWELVE_API_KEY}"
+        res = requests.get(url, timeout=5)
+        data = res.json()
+
+        if "price" not in data:
+            return None
+
+        return float(data["price"])
+
+    except:
         return None
 
-    return float(res["price"])
+# ===== GET CANDLES =====
+def get_candles(symbol, interval="5min"):
+    mapped = map_symbol(symbol)
 
-# ===== CHECK TRADES =====
-def check_trades():
-    global user_balance
+    url = f"https://api.twelvedata.com/time_series?symbol={mapped}&interval={interval}&outputsize=50&apikey={TWELVE_API_KEY}"
 
-    for trade in active_trades:
-        if trade["status"] != "open":
-            continue
+    res = requests.get(url, timeout=5)
+    data = res.json()
 
-        price = get_price(trade["symbol"])
-        if price is None:
-            continue
+    if "values" not in data:
+        return None
 
-        if trade["bias"] == "Buy":
-            if price >= trade["tp"]:
-                trade["status"] = "win"
-                user_balance += risk_per_trade * 2
-                trade_history.append(trade)
+    return data["values"]
 
-            elif price <= trade["sl"]:
-                trade["status"] = "loss"
-                user_balance -= risk_per_trade
-                trade_history.append(trade)
+# ===== TREND =====
+def detect_trend(candles):
+    closes = [float(c["close"]) for c in candles]
 
-        elif trade["bias"] == "Sell":
-            if price <= trade["tp"]:
-                trade["status"] = "win"
-                user_balance += risk_per_trade * 2
-                trade_history.append(trade)
+    if closes[-1] > closes[0]:
+        return "UP"
+    else:
+        return "DOWN"
 
-            elif price >= trade["sl"]:
-                trade["status"] = "loss"
-                user_balance -= risk_per_trade
-                trade_history.append(trade)
+# ===== LEVELS =====
+def get_levels(candles):
+    highs = [float(c["high"]) for c in candles]
+    lows = [float(c["low"]) for c in candles]
 
-# ===== HOME =====
-@app.get("/")
-def home():
-    return {"status": "running"}
+    return max(highs), min(lows)
+
+# ===== AI ENGINE =====
+def get_ai_analysis(symbol, price, trend, high, low):
+
+    prompt = f"""
+You are an elite scalping trader.
+
+Symbol: {symbol}
+Current price: {price}
+Trend: {trend}
+Resistance: {high}
+Support: {low}
+
+Rules:
+- Trade ONLY with trend
+- Entry near support/resistance or pullback
+- RR >= 1.5
+- High probability setup only
+
+Return ONLY JSON:
+
+{{
+  "bias": "",
+  "entry": 0,
+  "sl": 0,
+  "tp": 0,
+  "rr": 0,
+  "confidence": 0,
+  "reason": ""
+}}
+"""
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    return response.choices[0].message.content
 
 # ===== ANALYZE =====
 @app.get("/analyze")
 def analyze(symbol: str):
 
-    symbol = normalize_symbol(symbol)
-
     price = get_price(symbol)
 
-    if price is None:
+    if not price:
         return {"error": "No price data"}
 
-    prompt = f"""
-Give a scalping trade idea for {symbol}.
+    candles = get_candles(symbol)
 
-Current price: {price}
+    if not candles:
+        return {"error": "No candle data"}
 
-Return:
-
-Bias: Buy or Sell
-Entry:
-Stop Loss:
-Take Profit:
-Reason:
-"""
+    trend = detect_trend(candles)
+    high, low = get_levels(candles)
 
     try:
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}]
-        )
-
-        result = response["choices"][0]["message"]["content"]
-
-        # ===== SAVE TRADE (simple) =====
-        trade = {
-            "symbol": symbol,
-            "entry": price,
-            "tp": price + 10,
-            "sl": price - 10,
-            "bias": "Buy",
-            "status": "open"
-        }
-
-        active_trades.append(trade)
-
-        return {
-            "symbol": symbol,
-            "price": price,
-            "analysis": result
-        }
-
+        analysis = get_ai_analysis(symbol, price, trend, high, low)
     except Exception as e:
         return {"error": str(e)}
 
-# ===== STATUS =====
-@app.get("/status")
-def status():
-    check_trades()
-
     return {
-        "balance": user_balance,
-        "active_trades": active_trades,
-        "history": trade_history
+        "symbol": symbol.upper(),
+        "price": price,
+        "trend": trend,
+        "resistance": high,
+        "support": low,
+        "analysis": analysis
     }
+
+# ===== HEALTH =====
+@app.get("/")
+def root():
+    return {"status": "engine running"}
