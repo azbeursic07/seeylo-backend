@@ -6,24 +6,30 @@ app = FastAPI()
 
 OPENAI_KEY = os.getenv("OPENAI_KEY")
 
+
 def ask_ai(symbol):
     try:
         prompt = f"""
-        You are an elite scalping trading assistant.
+You are a professional scalping trader.
 
-        Analyze {symbol} and give BEST possible setup.
+Analyze {symbol} for short-term trading (1m–15m).
 
-        Only give trade if high quality.
-        If not → say NO TRADE.
+Rules:
+- Always provide a trade idea unless market is completely unclear
+- Prefer high probability setups
+- Use tight Stop Loss
+- Minimum Risk/Reward = 1.5
 
-        Format response EXACTLY like:
+Return EXACT format:
 
-        Entry: ...
-        Stop Loss: ...
-        Take Profit: ...
-        Risk/Reward: ...
-        Confidence: ...
-        """
+Bias: (Buy or Sell)
+Entry: ...
+Stop Loss: ...
+Take Profit: ...
+Risk/Reward: ...
+Confidence: (1-100%)
+Reason: (short explanation)
+"""
 
         headers = {
             "Authorization": f"Bearer {OPENAI_KEY}",
@@ -34,35 +40,46 @@ def ask_ai(symbol):
             "model": "gpt-4o-mini",
             "messages": [
                 {"role": "user", "content": prompt}
-            ]
+            ],
+            "temperature": 0.7
         }
 
         res = requests.post(
             "https://api.openai.com/v1/chat/completions",
             headers=headers,
-            json=data
+            json=data,
+            timeout=15
         )
 
         response_json = res.json()
 
-        # 🔥 DEBUG SAFE
+        # 🔥 Če OpenAI vrne error
         if "choices" not in response_json:
             return {
                 "error": "OpenAI API error",
-                "full_response": response_json
+                "details": response_json
             }
 
+        result_text = response_json["choices"][0]["message"]["content"]
+
         return {
-            "result": response_json["choices"][0]["message"]["content"]
+            "result": result_text
         }
 
     except Exception as e:
-        return {"error": str(e)}
+        return {
+            "error": str(e)
+        }
+
 
 @app.get("/")
 def root():
     return {"status": "running"}
 
+
 @app.get("/analyze")
 def analyze(symbol: str):
+    if not symbol:
+        return {"error": "No symbol provided"}
+
     return ask_ai(symbol)
