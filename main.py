@@ -12,8 +12,8 @@ TWELVE = os.getenv("TWELVE_API_KEY")
 
 # ===== STATE =====
 trades = []
-balance = 10000
 history = []
+balance = 10000
 
 # ===== SYMBOL NORMALIZATION =====
 def normalize(symbol):
@@ -27,53 +27,51 @@ def normalize(symbol):
     }
     return mapping.get(s, s)
 
-# ===== PRICE =====
+# ===== PRICE (robust) =====
 def get_price(symbol):
-    url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={TWELVE}"
-    r = requests.get(url).json()
-    if "price" in r:
-        return float(r["price"])
+    try:
+        r = requests.get(f"https://api.twelvedata.com/price?symbol={symbol}&apikey={TWELVE}").json()
+        if "price" in r:
+            return float(r["price"])
+
+        r = requests.get(f"https://api.twelvedata.com/quote?symbol={symbol}&apikey={TWELVE}").json()
+        if "close" in r:
+            return float(r["close"])
+
+    except:
+        return None
+
     return None
 
 # ===== CANDLES =====
 def get_candles(symbol):
-    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=5min&outputsize=30&apikey={TWELVE}"
-    r = requests.get(url).json()
+    r = requests.get(
+        f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=5min&outputsize=30&apikey={TWELVE}"
+    ).json()
 
     if "values" not in r:
         return None
 
-    candles = ""
-    for c in r["values"][:20]:
-        candles += f"{c['close']},"
+    return ",".join([c["close"] for c in r["values"][:20]])
 
-    return candles
-
-# ===== AI ENGINE =====
+# ===== AI =====
 def ai(symbol, price, candles):
-
     prompt = f"""
-You are a professional scalper.
+You are a pro scalper.
 
 Give ONE best trade setup.
 
 Symbol: {symbol}
 Price: {price}
-
-Candles:
-{candles}
+Candles: {candles}
 
 Rules:
-- High probability setup
+- High probability
 - RR >= 1.5
-- Tight but realistic SL
-- Follow trend
 
 FORMAT:
-
 Bias:
 Confidence:
-Reason:
 """
 
     res = client.chat.completions.create(
@@ -82,7 +80,6 @@ Reason:
     )
 
     return res.choices[0].message.content
-
 
 # ===== ANALYZE =====
 @app.get("/analyze")
@@ -101,16 +98,15 @@ def analyze(symbol: str):
 
     analysis = ai(norm, price, candles)
 
-    # ===== CREATE REALISTIC TRADE =====
     current = price
 
-    # scaling for NQ
+    # ===== NQ scaling =====
     if original == "NQ":
-        current = current * 42  # approx
+        current = current * 42
 
-    # direction
     bias = "BUY" if "BUY" in analysis.upper() else "SELL"
 
+    # ===== REALISTIC ENTRY =====
     if bias == "BUY":
         entry = current * 0.999
         sl = entry * 0.997
@@ -128,11 +124,11 @@ def analyze(symbol: str):
         "tp": round(tp, 2),
         "bias": bias,
         "status": "PENDING",
-        "created": str(datetime.now()),
+        "created_ts": datetime.now().timestamp(),
         "profit": 0
     }
 
-    trades.append(trade)
+    trades.insert(0, trade)
 
     return {
         "price": round(current, 2),
@@ -140,12 +136,12 @@ def analyze(symbol: str):
         "analysis": analysis
     }
 
-
 # ===== TRACK =====
 @app.get("/trades")
 def track():
-
     global balance
+
+    now = datetime.now().timestamp()
 
     for t in trades:
 
@@ -156,18 +152,20 @@ def track():
             continue
 
         if t["symbol"] == "NQ":
-            price = price * 42
+            price *= 42
 
-        # ===== STATE MACHINE =====
+        # ===== delay (fix instant TP/SL) =====
+        if now - t["created_ts"] < 5:
+            continue
 
-        # activate trade
+        # ===== activate =====
         if t["status"] == "PENDING":
             if t["bias"] == "BUY" and price <= t["entry"]:
                 t["status"] = "ACTIVE"
             elif t["bias"] == "SELL" and price >= t["entry"]:
                 t["status"] = "ACTIVE"
 
-        # active trade logic
+        # ===== active =====
         elif t["status"] == "ACTIVE":
 
             if t["bias"] == "BUY":
@@ -176,21 +174,13 @@ def track():
                     profit = t["tp"] - t["entry"]
                     t["status"] = "TP HIT"
                     balance += profit
-
-                    history.append({
-                        "date": str(datetime.now().date()),
-                        "profit": round(profit, 2)
-                    })
+                    history.append({"date": str(datetime.now().date()), "profit": round(profit, 2)})
 
                 elif price <= t["sl"]:
-                    profit = t["entry"] - t["sl"]
+                    loss = t["entry"] - t["sl"]
                     t["status"] = "SL HIT"
-                    balance -= profit
-
-                    history.append({
-                        "date": str(datetime.now().date()),
-                        "profit": -round(profit, 2)
-                    })
+                    balance -= loss
+                    history.append({"date": str(datetime.now().date()), "profit": -round(loss, 2)})
 
             else:
 
@@ -198,23 +188,15 @@ def track():
                     profit = t["entry"] - t["tp"]
                     t["status"] = "TP HIT"
                     balance += profit
-
-                    history.append({
-                        "date": str(datetime.now().date()),
-                        "profit": round(profit, 2)
-                    })
+                    history.append({"date": str(datetime.now().date()), "profit": round(profit, 2)})
 
                 elif price >= t["sl"]:
-                    profit = t["sl"] - t["entry"]
+                    loss = t["sl"] - t["entry"]
                     t["status"] = "SL HIT"
-                    balance -= profit
+                    balance -= loss
+                    history.append({"date": str(datetime.now().date()), "profit": -round(loss, 2)})
 
-                    history.append({
-                        "date": str(datetime.now().date()),
-                        "profit": -round(profit, 2)
-                    })
-
-        # live profit
+        # ===== live pnl =====
         if t["status"] == "ACTIVE":
             if t["bias"] == "BUY":
                 t["profit"] = round(price - t["entry"], 2)
@@ -226,17 +208,15 @@ def track():
         "trades": trades
     }
 
-
 # ===== HISTORY =====
 @app.get("/history")
 def get_history():
     return history
 
-
 # ===== RESET =====
 @app.get("/reset")
 def reset():
-    global trades, balance, history
+    global trades, history, balance
     trades = []
     history = []
     balance = 10000
